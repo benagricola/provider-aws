@@ -34,6 +34,14 @@ type ProviderCredentials struct {
 	// +kubebuilder:validation:Enum=None;Secret;InjectedIdentity;Environment;Filesystem
 	Source xpv1.CredentialsSource `json:"source"`
 
+	// OverrideARNEnvVar allows a user to override the env var
+	// name used to load the ARN when assuming a role using
+	// InjectedIdentity. This can be used with ControllerConfig
+	// to authenticate against multiple roles (and therefore
+	// also multiple AWS accounts) from a single provider instance.
+	// +optional
+	OverrideARNEnvVar *string `json:"overrideArnEnvVar,omitempty"`
+
 	xpv1.CommonCredentialSelectors `json:",inline"`
 }
 

@@ -63,6 +63,9 @@ spec:
                     required:
                     - path
                     type: object
+                  overrideArnEnvVar:
+                    description: OverrideARNEnvVar allows a user to override the env var name used to load the ARN when assuming a role using InjectedIdentity. This can be used with ControllerConfig to authenticate against multiple roles (and therefore also multiple AWS accounts) from a single provider instance.
+                    type: string
                   secretRef:
                     description: A SecretRef is a reference to a secret key that contains the credentials that must be used to connect to the provider.
                     properties:

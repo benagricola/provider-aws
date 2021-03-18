@@ -32,6 +32,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws/awserr"
 	"github.com/aws/aws-sdk-go-v2/aws/endpoints"
 	"github.com/aws/aws-sdk-go-v2/aws/external"
+	"github.com/aws/aws-sdk-go-v2/aws/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	awsv1 "github.com/aws/aws-sdk-go/aws"
@@ -98,7 +99,7 @@ func UseProviderConfig(ctx context.Context, c client.Client, mg resource.Managed
 
 	switch s := pc.Spec.Credentials.Source; s { //nolint:exhaustive
 	case xpv1.CredentialsSourceInjectedIdentity:
-		cfg, err := UsePodServiceAccount(ctx, []byte{}, DefaultSection, region)
+		cfg, err := UsePodServiceAccount(ctx, []byte{}, DefaultSection, region, pc.Spec.Credentials.OverrideARNEnvVar)
 		return SetResolver(ctx, mg, cfg), err
 	default:
 		data, err := resource.CommonCredentialExtractor(ctx, s, c, pc.Spec.Credentials.CommonCredentialSelectors)
@@ -149,7 +150,7 @@ func UseProvider(ctx context.Context, c client.Client, mg resource.Managed, regi
 	}
 
 	if aws.BoolValue(p.Spec.UseServiceAccount) {
-		return UsePodServiceAccount(ctx, []byte{}, DefaultSection, region)
+		return UsePodServiceAccount(ctx, []byte{}, DefaultSection, region, nil)
 	}
 
 	if p.Spec.CredentialsSecretRef == nil {
@@ -219,47 +220,61 @@ func UseProviderSecret(_ context.Context, data []byte, profile, region string) (
 	return &config, err
 }
 
+// PrintCallerIdentity prints caller identity
+func PrintCallerIdentity(ctx context.Context, cfg aws.Config, identifier string) {
+	svc := sts.New(cfg)
+
+	id, err := svc.GetCallerIdentityRequest(&sts.GetCallerIdentityInput{}).Send(ctx)
+	if err != nil {
+		return
+	}
+	fmt.Printf("\n\n[%s]: %s / %s\n\n", identifier, *id.Account, *id.Arn)
+}
+
 // UsePodServiceAccount assumes an IAM role configured via a ServiceAccount.
 // https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html
 //
 // TODO(hasheddan): This should be replaced by the implementation of the Web
 // Identity Token Provider in the following PR after merge and subsequent
 // release of AWS SDK: https://github.com/aws/aws-sdk-go-v2/pull/488
-func UsePodServiceAccount(ctx context.Context, _ []byte, _, region string) (*aws.Config, error) {
+func UsePodServiceAccount(ctx context.Context, _ []byte, _, region string, overrideEnvVar *string) (*aws.Config, error) {
+	// If a service account is configured, this call will
+	// automatically assume the role attached to the account.
 	cfg, err := external.LoadDefaultAWSConfig()
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to load default AWS config")
 	}
 	cfg.Region = region
+
+	if overrideEnvVar == nil {
+		return &cfg, nil
+	}
+
 	svc := sts.New(cfg)
 
-	b, err := ioutil.ReadFile(os.Getenv("AWS_WEB_IDENTITY_TOKEN_FILE"))
-	if err != nil {
-		return nil, errors.Wrap(err, "unable to read web identity token file in pod")
-	}
-	token := string(b)
 	sess := strconv.FormatInt(time.Now().UnixNano(), 10)
-	role := os.Getenv("AWS_ROLE_ARN")
-	resp, err := svc.AssumeRoleWithWebIdentityRequest(
-		&sts.AssumeRoleWithWebIdentityInput{
-			RoleSessionName:  &sess,
-			WebIdentityToken: &token,
-			RoleArn:          &role,
-		}).Send(ctx)
-	if err != nil {
-		return nil, err
-	}
-	creds := aws.Credentials{
-		AccessKeyID:     aws.StringValue(resp.Credentials.AccessKeyId),
-		SecretAccessKey: aws.StringValue(resp.Credentials.SecretAccessKey),
-		SessionToken:    aws.StringValue(resp.Credentials.SessionToken),
-	}
-	shared := external.SharedConfig{
-		Credentials: creds,
-		Region:      region,
-	}
-	config, err := external.LoadDefaultAWSConfig(shared)
-	return &config, err
+
+	role := os.Getenv(*overrideEnvVar)
+
+	PrintCallerIdentity(ctx, cfg, "BEFORE ASSUME ROLE")
+
+	creds := stscreds.NewAssumeRoleProvider(
+		svc,
+		role,
+		func(o *stscreds.AssumeRoleProviderOptions) {
+			o.RoleSessionName = sess
+		},
+	)
+
+	// Add an additional role to the credential chain
+	cfg.Credentials = aws.NewChainProvider([]aws.CredentialsProvider{
+		creds,
+		cfg.Credentials,
+	})
+
+	PrintCallerIdentity(ctx, cfg, "AFTER ASSUME ROLE")
+
+	return &cfg, nil
 }
 
 // NOTE(muvaf): ACK-generated controllers use aws/aws-sdk-go instead of
